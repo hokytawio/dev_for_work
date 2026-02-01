@@ -1,0 +1,251 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import fitz  # PyMuPDF
+import re
+from typing import Optional
+from dataclasses import dataclass
+from pathlib import Path
+
+@dataclass
+class FaturaDados:
+    tipo: str
+    numero_fatura: Optional[str]
+    data_compra: Optional[str]
+    num_talao: Optional[str]
+    loja: Optional[str]
+    vendedor: Optional[str]
+    caixa: Optional[str]
+    telefone: Optional[str]
+    nif: Optional[str]
+    nome_cliente: Optional[str]
+    num_pedido: Optional[str]
+    valor_total: Optional[str]
+    taxa_iva: Optional[str]
+
+def extrair_texto_pdf(caminho: str) -> str:
+    doc = fitz.open(caminho)
+    texto = "\n".join(page.get_text("text") for page in doc)
+    doc.close()
+    return texto
+
+def analisar_fatura(texto: str) -> FaturaDados:
+    padroes = {
+        'tipo': r'(NC\s+\d+|Adiantamento por conta|FACTURA No\s+FT)',
+        'numero_fatura': r'Documento referencia\s*:\s*(FT\s*\d+/.*?\d{6})',
+        'data_compra': r'(\d{2}/\d{2}/\d{4})',
+        'linha_talao': r'(\d{3})-(\d{6})-(\d{3})-(\d{4})',
+        'loja_nome': r'LEROY MERLIN\s*-?\s*([A-ZÁÉ\s]+?)(?=\n)',
+        'telefone': r'Telefone\s*:?\s*(\d{9})',
+        'nif': r'NIF:(\d{9})',
+        'nome_cliente': r'(SR\s+[A-ZÁÉÍÓÚ\s]+?)(?=\nRUA)',
+        'num_pedido': r'ENCOMENDA NO\s*:?\s*(\d+)',
+        'valor_total': r'SINAL\s*\(EUR\).*?[:\s]*(\d+[.,]\d{2})',
+        'taxa_iva': r'TVA\s*([\d.,]+%)'
+    }
+    
+    matches = {k: re.search(p, texto, re.I | re.MULTILINE) for k, p in padroes.items()}
+    
+    talao_match = matches['linha_talao']
+    loja_num = talao_match.group(1) if talao_match else None
+    vendedor_com_zeros = talao_match.group(2) if talao_match else None
+    caixa_num = talao_match.group(3) if talao_match else None
+    num_talao = talao_match.group(4) if talao_match else None
+    
+    vendedor_limpo = str(vendedor_com_zeros).lstrip('0') if vendedor_com_zeros else None
+    loja_nome_puro = matches['loja_nome'].group(1).strip() if matches['loja_nome'] else None
+    loja_completa = f"{loja_num} - {loja_nome_puro}" if loja_num and loja_nome_puro else None
+    
+    tipo_raw = matches['tipo'].group(1).strip() if matches['tipo'] else ''
+    tipo = 'NC' if 'NC' in tipo_raw else 'Adiantamento' if 'Adiantamento' in tipo_raw else 'Fatura integral'
+    
+    return FaturaDados(
+        tipo=tipo,
+        numero_fatura=matches['numero_fatura'].group(1).strip() if matches['numero_fatura'] else None,
+        data_compra=matches['data_compra'].group(1) if matches['data_compra'] else None,
+        num_talao=str(num_talao) if num_talao else None,
+        loja=loja_completa,
+        vendedor=vendedor_limpo,
+        caixa=str(caixa_num) if caixa_num else None,
+        telefone=str(matches['telefone'].group(1)) if matches['telefone'] else None,
+        nif=str(matches['nif'].group(1)) if matches['nif'] else None,
+        nome_cliente=matches['nome_cliente'].group(1).strip() if matches['nome_cliente'] else None,
+        num_pedido=str(matches['num_pedido'].group(1)) if matches['num_pedido'] else None,
+        valor_total=matches['valor_total'].group(1) if matches['valor_total'] else None,
+        taxa_iva=matches['taxa_iva'].group(1) if matches['taxa_iva'] else None
+    )
+
+class AppFaturaParser:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("⚡️ CYBERPUNK FATURA ANALYZER")
+        self.root.geometry("1100x700")
+        self.root.configure(bg='#0a0a0a')
+        
+        self.arquivos = []
+        self.dados_faturas = {}
+        self.dados_selecionados = None
+        self.setup_cyberpunk_styles()
+        self.setup_ui()
+    
+    def setup_cyberpunk_styles(self):
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        style.configure('Cyberpunk.Treeview', 
+                       background='#0d1117',
+                       foreground='#58a6ff',
+                       fieldbackground='#0d1117',
+                       borderwidth=0,
+                       rowheight=25,
+                       font=('Consolas', 10))
+        
+        style.map('Cyberpunk.Treeview',
+                 background=[('selected', '#238636')],
+                 foreground=[('selected', 'white')])
+        
+        style.configure('Cyberpunk.Treeview.Heading',
+                       background='#161b22',
+                       foreground='#00ff88',
+                       font=('Consolas', 11, 'bold'),
+                       relief='flat')
+        
+        style.map('Cyberpunk.Treeview.Heading',
+                 background=[('active', '#00ff88')],
+                 foreground=[('active', '#0a0a0a')])
+    
+    def setup_ui(self):
+        main_frame = tk.Frame(self.root, bg='#0a0a0a')
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        title_label = tk.Label(main_frame, 
+                              text="⚡️ FATURA ANALYZER v2.0 ⚡️", 
+                              bg='#0a0a0a', fg='#00ff88',
+                              font=('Consolas', 18, 'bold'))
+        title_label.pack(pady=(20, 30))
+        
+        paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+        
+        frame_esq = tk.Frame(paned, bg='#0a0a0a')
+        paned.add(frame_esq, weight=1)
+        
+        btn_carregar = tk.Button(frame_esq, 
+                                text="📁 CARREGAR PDFs", 
+                                command=self.carregar_pdfs,
+                                bg='#1a1a2e', fg='#00ff88',
+                                font=('Consolas', 11, 'bold'),
+                                relief=tk.FLAT,
+                                activebackground='#16213e',
+                                activeforeground='#88ffaa',
+                                padx=20, pady=8)
+        btn_carregar.pack(pady=10, padx=15)
+        
+        btn_analisar = tk.Button(frame_esq, 
+                                text="🔍 ANALISAR", 
+                                command=self.analisar_todos,
+                                bg='#1a1a2e', fg='#00ff88',
+                                font=('Consolas', 11, 'bold'),
+                                relief=tk.FLAT,
+                                activebackground='#16213e',
+                                activeforeground='#88ffaa',
+                                padx=15, pady=8)
+        btn_analisar.pack(pady=10, padx=15)
+        
+        frame_lista = tk.Frame(frame_esq, bg='#0a0a0a')
+        frame_lista.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        self.listbox = tk.Listbox(frame_lista, 
+                                 bg='#0d1117', fg='#00ff88',
+                                 selectbackground='#238636', selectforeground='white',
+                                 font=('Consolas', 10),
+                                 height=22,
+                                 relief=tk.FLAT,
+                                 bd=0,
+                                 highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame_lista, orient=tk.VERTICAL, command=self.listbox.yview)
+        self.listbox.config(yscrollcommand=scrollbar.set)
+        
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.listbox.bind('<<ListboxSelect>>', self.selecionar_fatura)
+        
+        frame_dir = tk.Frame(paned, bg='#0a0a0a')
+        paned.add(frame_dir, weight=2)
+        
+        cols = ('Campo', 'Valor', 'Copiar')
+        self.tree = ttk.Treeview(frame_dir, 
+                                columns=cols, 
+                                show='headings',
+                                height=24,
+                                style='Cyberpunk.Treeview')
+        
+        self.tree.heading('Campo', text='🔹 CAMPO')
+        self.tree.heading('Valor', text='💾 DADOS')
+        self.tree.heading('Copiar', text='⚡️ 3xCLICK')
+        
+        self.tree.column('Campo', width=200, anchor='w')
+        self.tree.column('Valor', width=450, anchor='w')
+        self.tree.column('Copiar', width=90, anchor='center')
+        
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        self.tree.bind('<Triple-1>', self.copiar_triplo_clique)
+    
+    def carregar_pdfs(self):
+        arquivos = filedialog.askopenfilenames(filetypes=[("PDF files", "*.pdf")])
+        for caminho in arquivos:
+            nome = Path(caminho).name
+            if nome not in [Path(p).name for p in self.arquivos]:
+                self.arquivos.append(caminho)
+                self.listbox.insert(tk.END, f"⚡️ {nome}")
+    
+    def analisar_todos(self):
+        self.dados_faturas.clear()
+        self.tree.delete(*self.tree.get_children())
+        for i, caminho in enumerate(self.arquivos):
+            nome = Path(caminho).name
+            try:
+                texto = extrair_texto_pdf(caminho)
+                dados = analisar_fatura(texto)
+                self.dados_faturas[nome] = dados
+                self.listbox.delete(i)
+                self.listbox.insert(i, f"✅ {nome}")
+                self.root.update()
+            except Exception as e:
+                self.listbox.delete(i)
+                self.listbox.insert(i, f"❌ ERRO: {nome}")
+                messagebox.showerror("Erro", f"Erro em {nome}: {e}")
+    
+    def selecionar_fatura(self, event):
+        selecao = self.listbox.curselection()
+        if selecao:
+            nome_com_emoji = self.listbox.get(selecao[0])
+            nome = nome_com_emoji.replace("✅ ", "").replace("⚡️ ", "")
+            self.dados_selecionados = self.dados_faturas.get(nome)
+            self.atualizar_tabela()
+    
+    def atualizar_tabela(self):
+        self.tree.delete(*self.tree.get_children())
+        if self.dados_selecionados:
+            for campo, valor in self.dados_selecionados.__dict__.items():
+                nome_campo = campo.replace('_', ' ').title()
+                valor_str = str(valor or 'N/A')
+                self.tree.insert('', tk.END, values=(nome_campo, valor_str, '⚡️ 3x'))
+    
+    def copiar_triplo_clique(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            valores = self.tree.item(item)['values']
+            valor = str(valores[1])  # ✅ GARANTIA DUPLA: sempre string
+            self.root.clipboard_clear()
+            self.root.clipboard_append(valor)
+            
+            # ✅ TRATAMENTO SEGURO para título (sem fatiar se muito curto)
+            titulo_copiado = valor[:25] + "..." if len(valor) > 25 else valor
+            self.root.title(f"⚡️ COPIADO: {titulo_copiado} ⚡️")
+            self.root.after(1500, lambda: self.root.title("⚡️ CYBERPUNK FATURA ANALYZER"))
+            messagebox.showinfo("⚡️ COPIADO!", f"Copiado com 3 cliques:\n\n💾 {valor}")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AppFaturaParser(root)
+    root.mainloop()
